@@ -1,9 +1,9 @@
 import { URLSearchParams } from 'url';
 import * as dotenv from 'dotenv';
-
-
+import { checkbox, Separator } from '@inquirer/prompts';
+import { rmSync } from 'fs';
 import { TOTP } from "totp-generator"
-import { exec } from 'child_process';
+import { execSync } from 'child_process';
 import {glob} from 'glob';
 import path from 'path';
 
@@ -74,7 +74,7 @@ getToken().then((token) => {
 
     console.log(token);
 
-    return fetch("https://desman4.smehost.net/api/v4/projects?page=1&limit=1&filter=active", {
+    return fetch("https://desman4.smehost.net/api/v4/projects?page=1&limit=100&filter=active", {
         "headers": {
           "accept": "application/json, text/plain, */*",
           "authorization": "Bearer " + token.accessToken,
@@ -93,45 +93,75 @@ getToken().then((token) => {
     return response.json();
 }).then((data) => {
     if (data.docs && data.docs.length > 0) {
-        const project = data.docs[0];
-        console.log(`Project Name: ${project.name}`);
-        console.log(`Project ID: ${project.id}`);
-        console.log(`Updated At: ${project.updatedAt}`);
-        gitScan(project.id);
+      const projects = data.docs
+      .sort((a: any, b: any) => a.id.localeCompare(b.id))
+      .map((project: any) => ({
+        id: project.id,
+        name: project.name,
+        value: project.id,
+        updatedAt: project.updatedAt
+      }));
+
+      const choices = projects.map((project: any) => ({
+        name: `${project.id} - ${project.name} (Updated At: ${project.updatedAt})`,
+        value: project.id
+      }));
+
+      checkbox({
+        message: 'Select projects to scan:',
+        choices: choices
+      }).then((value: unknown[]) => {
+        const selectedProjectIds = value as string[];
+        selectedProjectIds.forEach(async (projectId: string) => {
+          console.log(`Scanning project: ${projectId}`);
+          await gitScan(projectId);
+        });
+      }).catch((error: any) => {
+        console.error('Error selecting projects:', error);
+      });
     }
     
 }).catch((error) => {
     console.error('Error getting projects:', error);
 });
 
-const gitScan = function(projectId: string) {
+const gitScan = async function(projectId: string) {
     const repoUrl = `git@gitlab.smehost.net:desmanv4-managed/${projectId}.git`;
     const cloneDir = `./${projectId}`;
 
     console.log(`Cloning ${repoUrl} to ${cloneDir}`);
-    const git = exec(`git clone ${repoUrl} ${cloneDir}`, (error, stdout, stderr) => {
-        if (error) {
-            console.error(`Error cloning repository: ${error.message}`);
-            return;
+
+
+    try {
+      rmSync(cloneDir, { recursive: true, force: true });
+      execSync(`git clone -b devel ${repoUrl} ${cloneDir}`, { stdio: 'inherit' });
+      console.log('Git clone complete');
+
+      //glob directory for package.json
+      // and run npm audit fix
+
+      const files = await glob(`${cloneDir}/**/package.json`);
+      for (const file of files) {
+        const dir = path.dirname(file);
+        console.log(`Running npm audit fix in ${dir}`);
+        try {
+          execSync(`npm audit fix`, { cwd: dir, stdio: 'inherit' });
+        } catch (error) {
+          console.error(`Error running npm audit fix in ${dir}:`, error);
         }
-        console.log('Git clone complete');
-        
-        //glob directory for package.json
-        // and run npm audit fix
+        console.log('npm audit fix complete');
+      }
 
-        glob(`${cloneDir}/**/package.json`).then((files) => {
-            files.forEach((file) => {
-                const dir = path.dirname(file);
-                console.log(`Running npm audit fix in ${dir}`);
-                const npm = exec(`npm audit fix`, {cwd: dir}, (error, stdout, stderr) => {
-                    if (error) {
-                        console.error(`Error running npm audit fix: ${error.message}`);
-                        return;
-                    }
-                    console.log('npm audit fix complete');
-                });
-            });
-        });
+      execSync(`git commit -a -m "auto security audit"`, { cwd: cloneDir, stdio: 'inherit' });
+      execSync(`git push`, { cwd: cloneDir, stdio: 'inherit' });
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(`Error: ${error.message}`);
+      } else {
+        console.error('Unknown error:', error);
+      }
+    }
 
-    });
+    console.log('done');
+    return;
 }
